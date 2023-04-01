@@ -133,7 +133,7 @@ def load_tf_weights_in_t5(model, config, tf_checkpoint_path):
                     pointer = getattr(pointer, "final_layer_norm")
             elif scope_names[0] == "scale":
                 pointer = getattr(pointer, "weight")
-            elif scope_names[0] == "output_bias" or scope_names[0] == "beta":
+            elif scope_names[0] in ["output_bias", "beta"]:
                 pointer = getattr(pointer, "bias")
             elif scope_names[0] == "squad":
                 pointer = getattr(pointer, "classifier")
@@ -549,8 +549,7 @@ class DecoderOnlyT5LayerSelfAttention(nn.Module):
             output_attentions=output_attentions,
         )
         hidden_states = hidden_states + self.dropout(attention_output[0])
-        outputs = (hidden_states,) + attention_output[1:]  # add attentions if we output them
-        return outputs
+        return (hidden_states,) + attention_output[1:]
 
 
 # class T5LayerCrossAttention(nn.Module):
@@ -716,12 +715,11 @@ class DecoderOnlyT5PreTrainedModel(PreTrainedModel):
     def dummy_inputs(self):
         input_ids = torch.tensor(DUMMY_INPUTS)
         input_mask = torch.tensor(DUMMY_MASK)
-        dummy_inputs = {
+        return {
             # "decoder_input_ids": input_ids,
             "input_ids": input_ids,
             # "decoder_attention_mask": input_mask,
         }
-        return dummy_inputs
 
     def _init_weights(self, module):
         """Initialize the weights"""
@@ -800,7 +798,10 @@ class DecoderOnlyT5Stack(DecoderOnlyT5PreTrainedModel):
         # self.is_decoder = config.is_decoder
 
         self.block = nn.ModuleList(
-            [T5Block(config, has_relative_attention_bias=bool(i == 0)) for i in range(config.num_layers)]
+            [
+                T5Block(config, has_relative_attention_bias=i == 0)
+                for i in range(config.num_layers)
+            ]
         )
         self.final_layer_norm = DecoderOnlyT5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
@@ -818,12 +819,16 @@ class DecoderOnlyT5Stack(DecoderOnlyT5PreTrainedModel):
         )
         assert_device_map(self.device_map, len(self.block))
         self.model_parallel = True
-        self.first_device = "cpu" if "cpu" in self.device_map.keys() else "cuda:" + str(min(self.device_map.keys()))
-        self.last_device = "cuda:" + str(max(self.device_map.keys()))
+        self.first_device = (
+            "cpu"
+            if "cpu" in self.device_map.keys()
+            else f"cuda:{str(min(self.device_map.keys()))}"
+        )
+        self.last_device = f"cuda:{str(max(self.device_map.keys()))}"
         # Load onto devices
         for k, v in self.device_map.items():
             for layer in v:
-                cuda_device = "cuda:" + str(k)
+                cuda_device = f"cuda:{str(k)}"
                 self.block[layer] = self.block[layer].to(cuda_device)
 
         # Set embed_tokens to first layer
@@ -1029,8 +1034,8 @@ class DecoderOnlyT5Stack(DecoderOnlyT5PreTrainedModel):
             # Model Parallel: If it's the last layer for that device, put things on the next device
             if self.model_parallel:
                 for k, v in self.device_map.items():
-                    if i == v[-1] and "cuda:" + str(k) != self.last_device:
-                        hidden_states = hidden_states.to("cuda:" + str(k + 1))
+                    if i == v[-1] and f"cuda:{str(k)}" != self.last_device:
+                        hidden_states = hidden_states.to(f"cuda:{str(k + 1)}")
 
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.dropout(hidden_states)
@@ -1039,8 +1044,16 @@ class DecoderOnlyT5Stack(DecoderOnlyT5PreTrainedModel):
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
-        if not return_dict:
-            return tuple(
+        return (
+            BaseModelOutputWithPastAndCrossAttentions(
+                last_hidden_state=hidden_states,
+                past_key_values=present_key_value_states,
+                hidden_states=all_hidden_states,
+                attentions=all_attentions,
+                cross_attentions=all_cross_attentions,
+            )
+            if return_dict
+            else tuple(
                 v
                 for v in [
                     hidden_states,
@@ -1051,12 +1064,6 @@ class DecoderOnlyT5Stack(DecoderOnlyT5PreTrainedModel):
                 ]
                 if v is not None
             )
-        return BaseModelOutputWithPastAndCrossAttentions(
-            last_hidden_state=hidden_states,
-            past_key_values=present_key_value_states,
-            hidden_states=all_hidden_states,
-            attentions=all_attentions,
-            cross_attentions=all_cross_attentions,
         )
 
 
@@ -1505,7 +1512,7 @@ class DecoderOnlyT5LMHeadModel(DecoderOnlyT5PreTrainedModel):
             "use_cache": use_cache,
         }
 
-    def _reorder_cache(past, beam_idx):
+    def _reorder_cache(self, beam_idx):
         """
         This function is used to re-order the :obj:`past_key_values` cache if
         :meth:`~transformers.PreTrainedModel.beam_search` or :meth:`~transformers.PreTrainedModel.beam_sample` is

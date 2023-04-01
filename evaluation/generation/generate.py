@@ -47,7 +47,7 @@ def main():
         device_map="auto",
         max_memory=get_gpus_max_memory(args.max_memory_per_gpu),
         torch_dtype=torch.bfloat16,
-        revision="gs{}".format(args.global_step) if args.global_step else None,
+        revision=f"gs{args.global_step}" if args.global_step else None,
         offload_folder=args.offload_folder,
     )
     print(f"Loaded model in {datetime.datetime.now() - start}")

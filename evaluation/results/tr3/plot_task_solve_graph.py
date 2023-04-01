@@ -42,10 +42,10 @@ RANDOM_BASELINE={
     "wsc_acc": 0.5
 }
 def normalise_scores(scores_per_task):
-    normalised_scores = {}
-    for key,value in scores_per_task.items():
-        # We assume it exists, otherwise we need to figure out what the random baseline is
-        normalised_scores[key] = (value - RANDOM_BASELINE[key]) / (1. - RANDOM_BASELINE[key])
+    normalised_scores = {
+        key: (value - RANDOM_BASELINE[key]) / (1.0 - RANDOM_BASELINE[key])
+        for key, value in scores_per_task.items()
+    }
     # TODO: we need to substract the random baseline.
     return scores_per_task
 
@@ -61,12 +61,14 @@ def main():
 
     # We search for matching tokens
     matching_tokens = set(next(iter(final.values()))["tokens"])
-    for experiment_name, experiment in final.items():
+    for experiment in final.values():
         tokens = experiment["tokens"]
         matching_tokens = matching_tokens & set(tokens)
         # Make sure we don't override existing data
         assert "token2checkpoint_step" not in experiment
-        experiment["token2checkpoint_step"] = {token: ckpt_step for token, ckpt_step in zip(tokens, experiment["checkpoints"])}
+        experiment["token2checkpoint_step"] = dict(
+            zip(tokens, experiment["checkpoints"])
+        )
         # Make sure we don't override existing data
         assert "token2id" not in experiment
         experiment["token2id"] = {token: _id for _id, token in enumerate(tokens)}

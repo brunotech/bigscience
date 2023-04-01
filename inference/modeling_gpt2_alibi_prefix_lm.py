@@ -227,10 +227,7 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
             for i in range(self._config.n_layer * 2):
                 common_inputs[f"past_key_values.{i}"] = {0: "batch", 2: "sequence"}
 
-            common_inputs["attention_mask"] = {0: "batch", 1: "sequence"}
-        else:
-            common_inputs["attention_mask"] = {0: "batch", 1: "sequence"}
-
+        common_inputs["attention_mask"] = {0: "batch", 1: "sequence"}
         return common_inputs
 
     @property
@@ -257,11 +254,8 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
         # We need to order the input in the way they appears in the forward()
         ordered_inputs = OrderedDict({"input_ids": common_inputs["input_ids"]})
 
-        # Need to add the past_keys
         if self.use_past:
-            if not is_torch_available():
-                raise ValueError("Cannot generate dummy past_keys inputs without PyTorch installed.")
-            else:
+            if is_torch_available():
                 import torch
 
                 batch = common_inputs["input_ids"].shape[0]
@@ -273,6 +267,8 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
                     for _ in range(self._config.n_layer)
                 ]
 
+            else:
+                raise ValueError("Cannot generate dummy past_keys inputs without PyTorch installed.")
         ordered_inputs["attention_mask"] = common_inputs["attention_mask"]
         return ordered_inputs
 
@@ -327,11 +323,11 @@ def load_tf_weights_in_gpt2(model, config, gpt2_checkpoint_path):
                 scope_names = re.split(r"(\d+)", m_name)
             else:
                 scope_names = [m_name]
-            if scope_names[0] == "w" or scope_names[0] == "g":
+            if scope_names[0] in ["w", "g"]:
                 pointer = getattr(pointer, "weight")
             elif scope_names[0] == "b":
                 pointer = getattr(pointer, "bias")
-            elif scope_names[0] == "wpe" or scope_names[0] == "wte":
+            elif scope_names[0] in ["wpe", "wte"]:
                 pointer = getattr(pointer, scope_names[0])
                 pointer = getattr(pointer, "weight")
             else:
@@ -492,7 +488,7 @@ class GPT2Attention(nn.Module):
         alibi=None,
         use_cache=False,
         output_attentions=False,
-        
+
     ):
         if encoder_hidden_states is not None:
             if not hasattr(self, "q_attn"):
@@ -516,11 +512,7 @@ class GPT2Attention(nn.Module):
             key = torch.cat((past_key, key), dim=-2)
             value = torch.cat((past_value, value), dim=-2)
 
-        if use_cache is True:
-            present = (key, value)
-        else:
-            present = None
-
+        present = (key, value) if use_cache is True else None
         attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
 
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
@@ -624,12 +616,11 @@ class GPT2Block(nn.Module):
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
 
-        if use_cache:
-            outputs = (hidden_states,) + outputs
-        else:
-            outputs = (hidden_states,) + outputs[1:]
-
-        return outputs  # hidden_states, present, (attentions, cross_attentions)
+        return (
+            (hidden_states,) + outputs
+            if use_cache
+            else (hidden_states,) + outputs[1:]
+        )
 
 
 class GPT2PreTrainedModel(PreTrainedModel):
@@ -887,10 +878,12 @@ class GPT2Model(GPT2PreTrainedModel):
 
             if math.log2(n).is_integer():
                 return get_slopes_power_of_2(n)
-            else:
-                closest_power_of_2 = 2 ** math.floor(math.log2(n))
-                return get_slopes_power_of_2(closest_power_of_2) + get_slopes(2 * closest_power_of_2)[0::2][
-                                                                   :n - closest_power_of_2]
+            closest_power_of_2 = 2 ** math.floor(math.log2(n))
+            return (
+                get_slopes_power_of_2(closest_power_of_2)
+                + get_slopes(2 * closest_power_of_2)[::2][: n - closest_power_of_2]
+            )
+
         slopes = torch.Tensor(get_slopes(num_attention_heads))
         alibi = slopes.unsqueeze(1).unsqueeze(1) * torch.arange(max_seq_len).unsqueeze(0).unsqueeze(0).expand(num_attention_heads, -1, -1)
         alibi = alibi.repeat(batch_size, 1, 1)
@@ -905,14 +898,18 @@ class GPT2Model(GPT2PreTrainedModel):
         )
         assert_device_map(self.device_map, len(self.h))
         self.model_parallel = True
-        self.first_device = "cpu" if "cpu" in self.device_map.keys() else "cuda:" + str(min(self.device_map.keys()))
-        self.last_device = "cuda:" + str(max(self.device_map.keys()))
+        self.first_device = (
+            "cpu"
+            if "cpu" in self.device_map.keys()
+            else f"cuda:{str(min(self.device_map.keys()))}"
+        )
+        self.last_device = f"cuda:{str(max(self.device_map.keys()))}"
         self.wte = self.wte.to(self.first_device)
         self.wpe = self.wpe.to(self.first_device)
         # Load onto devices
         for k, v in self.device_map.items():
             for block in v:
-                cuda_device = "cuda:" + str(k)
+                cuda_device = f"cuda:{str(k)}"
                 self.h[block] = self.h[block].to(cuda_device)
         # ln_f to last
         self.ln_f = self.ln_f.to(self.last_device)
@@ -1011,7 +1008,7 @@ class GPT2Model(GPT2PreTrainedModel):
             if prefix_lm_token_id is not None and input_ids is not None:
                 for attention_mask_row, input_ids_row in zip(attention_mask, input_ids): # do this in the bs dimension
                     attention_mask_row[: (input_ids_row == prefix_lm_token_id).nonzero(as_tuple=True)[0], :] = 1.0 # is this right?
-                
+
             # We create a 3D attention mask from a 2D tensor mask.
             # Sizes are [batch_size, 1, 1, to_seq_length]
             # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
@@ -1127,8 +1124,8 @@ class GPT2Model(GPT2PreTrainedModel):
             # Model Parallel: If it's the last layer for that device, put things on the next device
             if self.model_parallel:
                 for k, v in self.device_map.items():
-                    if i == v[-1] and "cuda:" + str(k) != self.last_device:
-                        hidden_states = hidden_states.to("cuda:" + str(k + 1))
+                    if i == v[-1] and f"cuda:{str(k)}" != self.last_device:
+                        hidden_states = hidden_states.to(f"cuda:{str(k + 1)}")
 
         hidden_states = self.ln_f(hidden_states)
 
@@ -1137,19 +1134,26 @@ class GPT2Model(GPT2PreTrainedModel):
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
-        if not return_dict:
-            return tuple(
+        return (
+            BaseModelOutputWithPastAndCrossAttentions(
+                last_hidden_state=hidden_states,
+                past_key_values=presents,
+                hidden_states=all_hidden_states,
+                attentions=all_self_attentions,
+                cross_attentions=all_cross_attentions,
+            )
+            if return_dict
+            else tuple(
                 v
-                for v in [hidden_states, presents, all_hidden_states, all_self_attentions, all_cross_attentions]
+                for v in [
+                    hidden_states,
+                    presents,
+                    all_hidden_states,
+                    all_self_attentions,
+                    all_cross_attentions,
+                ]
                 if v is not None
             )
-
-        return BaseModelOutputWithPastAndCrossAttentions(
-            last_hidden_state=hidden_states,
-            past_key_values=presents,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attentions,
-            cross_attentions=all_cross_attentions,
         )
 
 
@@ -1201,15 +1205,15 @@ class GPT2LMHeadModel(GPT2PreTrainedModel):
         self.lm_head = new_embeddings
 
     def prepare_inputs_for_generation(self, input_ids, past=None, **kwargs):
-        token_type_ids = kwargs.get("token_type_ids", None)
+        token_type_ids = kwargs.get("token_type_ids")
         # only last token for inputs_ids if past is defined in kwargs
         if past:
             input_ids = input_ids[:, -1].unsqueeze(-1)
             if token_type_ids is not None:
                 token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
 
-        attention_mask = kwargs.get("attention_mask", None)
-        position_ids = kwargs.get("position_ids", None)
+        attention_mask = kwargs.get("attention_mask")
+        position_ids = kwargs.get("position_ids")
 
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
@@ -1373,15 +1377,15 @@ class GPT2DoubleHeadsModel(GPT2PreTrainedModel):
         self.lm_head = new_embeddings
 
     def prepare_inputs_for_generation(self, input_ids, past=None, **kwargs):
-        token_type_ids = kwargs.get("token_type_ids", None)
+        token_type_ids = kwargs.get("token_type_ids")
         # only last token for inputs_ids if past is defined in kwargs
         if past:
             input_ids = input_ids[:, -1].unsqueeze(-1)
             if token_type_ids is not None:
                 token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
 
-        attention_mask = kwargs.get("attention_mask", None)
-        position_ids = kwargs.get("position_ids", None)
+        attention_mask = kwargs.get("attention_mask")
+        position_ids = kwargs.get("position_ids")
 
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
@@ -1613,16 +1617,15 @@ class GPT2ForSequenceClassification(GPT2PreTrainedModel):
         ), "Cannot handle batch sizes > 1 if no padding token is defined."
         if self.config.pad_token_id is None:
             sequence_lengths = -1
-        else:
-            if input_ids is not None:
-                sequence_lengths = torch.ne(input_ids, self.config.pad_token_id).sum(-1) - 1
-            else:
-                sequence_lengths = -1
-                logger.warning(
-                    f"{self.__class__.__name__} will not detect padding tokens in `inputs_embeds`. Results may be "
-                    f"unexpected if using padding tokens in conjunction with `inputs_embeds.`"
-                )
+        elif input_ids is None:
+            sequence_lengths = -1
+            logger.warning(
+                f"{self.__class__.__name__} will not detect padding tokens in `inputs_embeds`. Results may be "
+                f"unexpected if using padding tokens in conjunction with `inputs_embeds.`"
+            )
 
+        else:
+            sequence_lengths = torch.ne(input_ids, self.config.pad_token_id).sum(-1) - 1
         pooled_logits = logits[range(batch_size), sequence_lengths]
 
         loss = None

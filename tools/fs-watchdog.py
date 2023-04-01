@@ -37,7 +37,7 @@ Subject: {subject}
 
 def send_email_alert(msg):
 
-    subject = f"[ALERT] JZ filesystem is getting close to being full"
+    subject = "[ALERT] JZ filesystem is getting close to being full"
     body = f"""
 ***ALERT: One or more partitions at JZ are getting close to being full! Alert someone at Eng WG***
 
@@ -54,7 +54,7 @@ If unsure what to do, please post in the #bigscience-engineering slack channel.
 def check_running_on_jean_zay():
     fqdn = socket.getfqdn()
     # sometimes it gives fqdn, other times it doesn't, so try to use both patterns
-    if not ("idris.fr" in fqdn or "idrsrv" in fqdn):
+    if "idris.fr" not in fqdn and "idrsrv" not in fqdn:
         raise ValueError("This script relies on JZ's specific environment and won't work elsewhere. "
         f"You're attempting to run it on '{fqdn}'.")
 
@@ -130,7 +130,7 @@ def main():
         if inodes_percent/100 > alert_inodes_threshold:
             msg.append(f"{partition_name} is at {inodes_percent:.2f}% inodes usage")
 
-        if len(msg) > 0:
+        if msg:
             alerts.extend(msg)
             alerts.append(response)
             alerts.append("")
@@ -146,7 +146,7 @@ def main():
         disk_metas = response.split("\n")
         column_names = disk_metas[0].split()
         disk_meta = [disk_meta_.split() for disk_meta_ in disk_metas if disk_meta_.startswith(partition_name_2_disk[partition_name])][0]
-        disk_meta = {column_name: value for column_name, value in zip(column_names, disk_meta)}
+        disk_meta = dict(zip(column_names, disk_meta))
 
         # default `df` counts uses 1024-byte units, and `1024 == 2 ** 10`
         available_disk_left = int(disk_meta["Available"]) * 2 ** 10
@@ -170,8 +170,8 @@ def main():
     analyse_partition_bytes(partition_name="WORKSF", partition_path="/gpfsssd/worksf/projects/rech/six/", hard_limit_bytes=2*2**40, alert_bytes_threshold=0.85)
     analyse_partition_inodes(partition_name="WORKSF", partition_path="/gpfsssd/worksf/projects/rech/six/", hard_limit_inodes=3*10**6, alert_inodes_threshold=0.85)
 
-    if len(alerts) > 0 :
-        print(f"[ALERT] JZ filesystem is getting close to being full")
+    if alerts:
+        print("[ALERT] JZ filesystem is getting close to being full")
         msg = "\n".join(alerts)
         print(msg)
 

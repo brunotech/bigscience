@@ -153,10 +153,7 @@ def get_new_and_modified_files(local_dir) -> List[str]:
     except subprocess.CalledProcessError as exc:
         raise EnvironmentError(exc.stderr)
 
-    if len(output) == 0:
-        return []
-
-    return [f.strip() for f in output.split("\n")]
+    return [] if len(output) == 0 else [f.strip() for f in output.split("\n")]
 
 
 def run_cmd(cmd, local_dir):
@@ -180,7 +177,7 @@ def hub_config_repo(hub_data, local_dir):
     # if we have the bot user email set, that means we have done this process already
     # but some users don't have any `user.email` set, so recover gracefully if that's the case
     try:
-        cmd = f"git config user.email"
+        cmd = "git config user.email"
         email = run_cmd(cmd.split(), local_dir)
         if len(email) > 0 and email == hub_data['email']:
             return
@@ -275,7 +272,7 @@ def main():
             if args.debug:
                 print(''.join(f"- {f}\n" for f in uncommitted_files_matched))
 
-            if len(uncommitted_files_matched) > 0:
+            if uncommitted_files_matched:
                 total_to_commit += len(uncommitted_files_matched)
 
                 # # auto_lfs_track requires huggingface-hub-0.0.15, but transformers forces 0.0.12
